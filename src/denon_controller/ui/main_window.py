@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
@@ -91,10 +92,15 @@ class ReceiverWorker(QObject):
                 copy.deepcopy(self.receiver.state), list(self.receiver.diagnostics.events)
             )
 
-    @Slot(object, bool)
-    def connect_receiver(self, settings: Settings, simulate: bool) -> None:
+    @Slot(object, bool, object)
+    def connect_receiver(
+        self,
+        settings: Settings,
+        simulate: bool,
+        cancelled: threading.Event,
+    ) -> None:
         self.disconnect_receiver()
-        self.receiver = Receiver(settings, simulate=simulate)
+        self.receiver = Receiver(settings, simulate=simulate, cancelled=cancelled)
         self.receiver.state.connection = Connection.CONNECTING
         self.publish()
         self.failures = 0
@@ -164,7 +170,7 @@ class ReceiverWorker(QObject):
 
 
 class MainWindow(QMainWindow):
-    connect_requested = Signal(object, bool)
+    connect_requested = Signal(object, bool, object)
     disconnect_requested = Signal()
     action_requested = Signal(str, object)
     candidate_requested = Signal(bool)
@@ -181,6 +187,7 @@ class MainWindow(QMainWindow):
         self.stopped = False
         self.state = DeviceState()
         self.log = Diagnostics(settings.host)
+        self.cancelled = threading.Event()
         self.setWindowTitle("Denon AVR Controller" + (" — SIMULATION" if simulate else ""))
         self.resize(1060, 900)
         apply_theme(settings.theme)
@@ -247,6 +254,12 @@ class MainWindow(QMainWindow):
         self.thread.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.finish_close)
         self.thread.start()
+        self.freshness_timer = QTimer(self)
+        self.freshness_timer.setInterval(1000)
+        self.freshness_timer.timeout.connect(
+            lambda: self.update_state(self.state, list(self.log.events))
+        )
+        self.freshness_timer.start()
         self.connect_button.clicked.connect(self.connect_receiver)
         self.disconnect_button.clicked.connect(self.disconnect_receiver)
         self.refresh_button.clicked.connect(self.refresh_requested)
@@ -270,10 +283,12 @@ class MainWindow(QMainWindow):
         self.connected = True
         self.state = DeviceState(connection=Connection.CONNECTING)
         self.update_state(self.state, [])
-        self.connect_requested.emit(self.settings, self.simulate)
+        self.cancelled = threading.Event()
+        self.connect_requested.emit(self.settings, self.simulate, self.cancelled)
 
     @Slot()
     def disconnect_receiver(self) -> None:
+        self.cancelled.set()
         self.connected = False
         self.overview.candidates.setChecked(False)
         self.disconnect_requested.emit()
@@ -345,8 +360,12 @@ class MainWindow(QMainWindow):
             candidates=candidates,
             connected=self.connected,
             ceiling=self.settings.volume_ceiling,
+            max_age=min(10, self.settings.poll_interval * 2),
         )
-        self.sources.update_state(state, enabled)
+        self.sources.update_state(
+            state,
+            enabled and state.is_fresh("main.source", min(10, self.settings.poll_interval * 2)),
+        )
         self.sound.update_state(state)
         self.zones.update_state(state)
         self.diagnostics.update_state(state, events)
@@ -402,6 +421,7 @@ class MainWindow(QMainWindow):
             self.closing = True
             self.setEnabled(False)
             self.message.setText("Closing bounded network operations…")
+            self.cancelled.set()
             self.shutdown_requested.emit()
 
     @Slot()

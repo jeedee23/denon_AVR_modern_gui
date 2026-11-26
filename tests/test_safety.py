@@ -67,7 +67,7 @@ def test_http_200_is_not_confirmation_and_no_retry():
     assert receiver.state.outcome == "Sent, awaiting confirmation"
     receiver.http.send.assert_called_once_with("PWON")
     receiver.http.send.side_effect = TimeoutError("timeout")
-    receiver.pending.deadline -= 20
+    receiver.pending["main.power"].deadline -= 20
     receiver._confirm()
     assert "Indeterminate" in receiver.state.outcome
     receiver.http.send.assert_called_once()
@@ -93,7 +93,7 @@ def test_cached_pre_command_state_cannot_confirm_a_write():
     receiver.last_command -= 1
     with pytest.raises(ValueError, match="awaiting"):
         receiver.action("power_on")
-    assert receiver.pending is not None
+    assert receiver.pending
     assert receiver.state.outcome == "Sent, awaiting confirmation"
     receiver.http.send.assert_called_once()
 
@@ -105,6 +105,58 @@ def test_unmute_requires_measured_safe_volume():
         receiver.action("mute", False)
     receiver.action("mute", True)
     assert receiver.simulation.sent == ["MUON"]
+
+
+def test_repeated_reduction_never_undoes_pending_quieter_target():
+    receiver = ready()
+    receiver.state.main.volume_db = -20
+    receiver.action("volume", -40)
+    receiver.last_command -= 1
+    receiver.action("volume_down")
+    assert receiver.simulation.sent == ["MV40", "MV395"]
+
+
+def test_mute_does_not_forget_pending_volume_floor():
+    receiver = ready()
+    receiver.state.main.volume_db = -20
+    receiver.action("volume", -40)
+    receiver.last_command -= 1
+    receiver.action("mute", True)
+    receiver.last_command -= 1
+    receiver.action("volume_down")
+    assert receiver.simulation.sent == ["MV40", "MUON", "MV395"]
+    assert set(receiver.pending) == {"main.volume_db", "main.mute"}
+
+
+def test_direct_reduction_cannot_raise_a_pending_quieter_target():
+    receiver = ready()
+    receiver.state.main.volume_db = -20
+    receiver.action("volume", -40)
+    receiver.last_command -= 1
+    with pytest.raises(ValueError, match="quieter"):
+        receiver.action("volume", -30)
+    assert receiver.simulation.sent == ["MV40"]
+
+
+@pytest.mark.parametrize(("action", "value"), [("volume_down", None), ("mute", False)])
+def test_unrelated_event_cannot_refresh_main_volume(action, value):
+    receiver = ready()
+    receiver.state.observed_at["main.volume_db"] -= 300
+    receiver.tcp = Mock()
+    receiver.tcp.read.return_value = ["Z2ON"]
+    assert receiver.receive_events()
+    with pytest.raises(ValueError, match="Fresh readback"):
+        receiver.action(action, value)
+    assert not receiver.simulation.sent
+
+
+def test_cancelled_session_cannot_send_queued_writes():
+    receiver = ready()
+    receiver.cancelled.set()
+    with pytest.raises(ValueError, match="disconnected"):
+        receiver.action("power_on")
+    receiver.poll()
+    assert not receiver.simulation.sent
 
 
 @pytest.mark.parametrize("command", ["PWON\rMV98", "SIfoo?PWON", "PSMULTEQ:AUDYSSEY", "CVFL UP"])

@@ -34,7 +34,8 @@ because a read query exists, a library supports a related family, HTTP returns
 - HTTP/TCP share one pinned private destination resolved from the configured
   hostname. All DNS answers must be LAN-private; loopback, public, documentation,
   multicast and carrier-grade NAT addresses are refused. No Tailscale access
-  is enabled. OS DNS resolution itself follows the host resolver's timeout.
+  is enabled. Name lookup has a bounded wait; an abandoned OS resolver call
+  can finish in a daemon thread without delaying the GUI or shutdown.
 - XML is bounded to 64 KiB and rejects DTDs/entities and NUL-encoded documents.
   Only known fields produce state. Main XML `Power` is Main Zone, not system PW.
 - Denon `MV00` means −80 dB, `MV50` means −30 dB and `MV505` means −29.5 dB.
@@ -42,9 +43,16 @@ because a read query exists, a library supports a related family, HTTP returns
   are stricter. `MVUP`/`MVDOWN` are not used by the GUI: bounded absolute
   half-step writes avoid ambiguous relative retry outcomes.
 - The worker serializes all requests. At most one non-safety-reducing write
-  awaits readback; rate limit is 400 ms. Identical absolute-volume requests
-  are suppressed. Pending expires after ten seconds as **Indeterminate**.
+  awaits readback; rate limit is 400 ms. Pending targets are tracked per field,
+  so a safety-reducing mute cannot discard an unconfirmed volume reduction.
+  Further reductions use the quieter of measured and unresolved target volume.
+  Identical absolute-volume requests are suppressed.
+  Pending expires after ten seconds as **Indeterminate**.
   New polls/events can confirm target state but are not proof of causation.
+- Every recognized field has its own observation timestamp. An unrelated
+  event cannot authorize volume changes or unmuting. Candidate writes require
+  their relevant field(s) observed within twice the poll interval, capped at
+  ten seconds; Refresh is required if standby/backoff makes those fields stale.
 - TCP sends only fixed read queries on connect and each poll. Unsolicited
   CR-delimited events are drained between polls; TCP retry is capped at once
   per 30 seconds. Some firmware permits only one TCP client; failure falls
@@ -52,7 +60,9 @@ because a read query exists, a library supports a related family, HTTP returns
 - Polling backs off up to 60 seconds offline, and at least 30 seconds in
   standby. A pending action temporarily requests faster readback. Individual
   HTTP/TCP operations have short timeouts, though a full multi-endpoint probe
-  can take several timeouts. Closing the window remains asynchronous.
+  can take several timeouts. HTTP also enforces a total request deadline,
+  including trickling headers/bodies. Disconnect/close signals thread-safe
+  cancellation without waiting on network work in the GUI thread.
 - Source lists, XML schemas and half-step support still need X3400H firmware
   validation. Source metadata refreshes at most once per minute.
   Unknown fields/modes and unreported metadata remain Not available.

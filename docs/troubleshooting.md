@@ -43,7 +43,11 @@
   The slider is clamped to the ceiling and only writes on an explicit mouse
   release; receiving status, focusing it or pressing arrow keys sends nothing.
 - A pending write blocks further non-safety-reducing writes. Muting or reducing
-  volume can supersede it. A timed-out send is indeterminate, never retried.
+  volume remains possible, without forgetting unresolved quieter volume targets.
+  A timed-out send is indeterminate, never retried.
+- Freshness is per field, at most ten seconds (or twice the poll interval if
+  shorter). A Zone 2 or source event does not refresh volume. Use Refresh before
+  changing controls if standby polling or backoff makes their readback stale.
 - Unmute requires measured volume at or below the safe ceiling. System standby can affect
   Zone 2 and is guarded. Persistent calibration is never written.
 - Logs contain safe categories and parsed numeric state, not raw XML, MAC

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
+import queue
 import re
 import socket
+import threading
+import time
 from urllib.parse import quote
 
 from denon_controller.settings import Settings
@@ -27,10 +30,38 @@ PRIVATE_NETWORKS = tuple(
 )
 
 
-def private_address(host: str) -> str:
+def private_address(
+    host: str,
+    *,
+    timeout: float = 1.5,
+    cancelled: threading.Event | None = None,
+) -> str:
     """Resolve once and pin connections; reject mixed public/private DNS answers."""
-    answers = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    addresses = [answer[4][0] for answer in answers]
+    try:
+        addresses = [str(ipaddress.ip_address(host))]
+    except ValueError:
+        result: queue.Queue[list | Exception] = queue.Queue(maxsize=1)
+
+        def resolve() -> None:
+            try:
+                result.put(socket.getaddrinfo(host, None, type=socket.SOCK_STREAM))
+            except Exception as exc:
+                result.put(exc)
+
+        threading.Thread(target=resolve, daemon=True).start()
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or cancelled is not None and cancelled.is_set():
+                raise TimeoutError("Receiver name lookup timed out or was cancelled.") from None
+            try:
+                answers = result.get(timeout=min(0.05, remaining))
+                break
+            except queue.Empty:
+                pass
+        if isinstance(answers, Exception):
+            raise answers from None
+        addresses = [answer[4][0] for answer in answers]
     if not addresses:
         raise ValueError("Receiver hostname has no address.")
     for address in addresses:
@@ -50,11 +81,24 @@ def validate_command(command: str) -> None:
 
 
 class HttpTransport:
-    def __init__(self, settings: Settings, address: str | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        address: str | None = None,
+        *,
+        cancelled: threading.Event | None = None,
+    ) -> None:
         self.settings = settings
-        self.address = address or private_address(settings.host)
+        self.cancelled = cancelled or threading.Event()
+        self.address = address or private_address(
+            settings.host,
+            timeout=settings.timeout,
+            cancelled=self.cancelled,
+        )
 
     def get(self, path: str) -> bytes:
+        if self.cancelled.is_set():
+            raise OSError("HTTP request cancelled.")
         allowed = (*STATUS_PATHS, ZONE2_PATH, DEVICE_PATH)
         if path not in allowed and not path.startswith("/goform/formiPhoneAppDirect.xml?"):
             raise ValueError("Endpoint is not allowlisted.")
@@ -65,16 +109,46 @@ class HttpTransport:
         connection = http.client.HTTPConnection(
             self.address, self.settings.http_port, timeout=self.settings.timeout
         )
+        deadline = time.monotonic() + self.settings.timeout
+        done = threading.Event()
+        aborted = threading.Event()
+        watchdog: threading.Thread | None = None
         try:
+            connection.connect()
+            network_socket = connection.sock
+
+            def enforce_deadline() -> None:
+                while not done.is_set():
+                    remaining = deadline - time.monotonic()
+                    if self.cancelled.is_set() or remaining <= 0:
+                        aborted.set()
+                        try:
+                            network_socket.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                        return
+                    done.wait(min(0.05, remaining))
+
+            watchdog = threading.Thread(target=enforce_deadline, daemon=True)
+            watchdog.start()
             connection.request("GET", path)
             response = connection.getresponse()
             if response.status != 200:
                 raise OSError(f"HTTP status {response.status}")
             data = response.read(65537)
+            if aborted.is_set() or time.monotonic() >= deadline:
+                raise TimeoutError("HTTP request deadline exceeded or cancelled.")
             if len(data) > 65536:
                 raise ValueError("Oversized HTTP response.")
             return data
+        except (OSError, http.client.HTTPException):
+            if aborted.is_set() or self.cancelled.is_set():
+                raise TimeoutError("HTTP request deadline exceeded or cancelled.") from None
+            raise
         finally:
+            done.set()
+            if watchdog:
+                watchdog.join()
             connection.close()
 
     def send(self, command: str) -> None:
@@ -82,4 +156,4 @@ class HttpTransport:
         self.get("/goform/formiPhoneAppDirect.xml?" + quote(command, safe=""))
 
     def close(self) -> None:
-        pass
+        self.cancelled.set()

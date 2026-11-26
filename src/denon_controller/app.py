@@ -38,7 +38,7 @@ def diagnose(
             simulation.populate(state)
             observed = True
         else:
-            address = private_address(settings.host)
+            address = private_address(settings.host, timeout=settings.timeout)
             http = HttpTransport(settings, address)
             if power_on:
                 try:

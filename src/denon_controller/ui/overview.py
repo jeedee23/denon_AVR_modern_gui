@@ -112,6 +112,7 @@ class Overview(QWidget):
         candidates: bool,
         connected: bool,
         ceiling: float,
+        max_age: float = 10,
     ) -> None:
         self.system.setText(power_text(state.system_power))
         self.main_power.setText(power_text(state.main.power))
@@ -123,15 +124,15 @@ class Overview(QWidget):
             "Not available" if state.main.mute is None else ("Muted" if state.main.mute else "Off")
         )
         usable = connected and state.connection == Connection.CONNECTED and candidates
+        volume_fresh = db is not None and state.is_fresh("main.volume_db", max_age)
+        mute_fresh = state.main.mute is not None and state.is_fresh("main.mute", max_age)
         self.power_on.setEnabled(connected)
-        self.standby.setEnabled(usable and state.system_power is not None)
-        self.up.setEnabled(usable and db is not None and db < ceiling)
-        self.down.setEnabled(usable and db is not None and db > -80)
-        self.mute_on.setEnabled(usable and state.main.mute is not None)
-        self.mute_off.setEnabled(
-            usable and state.main.mute is not None and db is not None and db <= ceiling
-        )
-        self.slider.setEnabled(usable and db is not None)
+        self.standby.setEnabled(usable and state.is_fresh("system_power", max_age))
+        self.up.setEnabled(usable and volume_fresh and db < ceiling)
+        self.down.setEnabled(usable and volume_fresh and db > -80)
+        self.mute_on.setEnabled(usable and mute_fresh)
+        self.mute_off.setEnabled(usable and mute_fresh and volume_fresh and db <= ceiling)
+        self.slider.setEnabled(usable and volume_fresh)
         if not self.slider.isSliderDown():
             self.slider.setMaximum(int(ceiling * 2))
             if db is not None:

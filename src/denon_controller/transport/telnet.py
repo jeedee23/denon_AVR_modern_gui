@@ -15,7 +15,7 @@ class TelnetTransport:
 
     def __init__(self, settings: Settings, address: str | None = None) -> None:
         self.settings = settings
-        self.address = address or private_address(settings.host)
+        self.address = address or private_address(settings.host, timeout=settings.timeout)
         self.socket: socket.socket | None = None
         self.buffer = b""
 

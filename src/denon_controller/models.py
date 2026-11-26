@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -43,6 +44,17 @@ class DeviceState:
     roundtrip_ms: float | None = None
     last_error: str = ""
     outcome: str = "No commands sent"
+    observed_at: dict[str, float] = field(default_factory=dict)
+
+    def is_fresh(self, attribute: str, max_age: float) -> bool:
+        observed = self.observed_at.get(attribute)
+        return observed is not None and time.monotonic() - observed <= max_age
+
+
+def _observe(state: DeviceState, target: DeviceState | ZoneState, attribute: str, value) -> None:
+    setattr(target, attribute, value)
+    prefix = "" if target is state else ("main." if target is state.main else "zone2.")
+    state.observed_at[prefix + attribute] = time.monotonic()
 
 
 def encode_volume(db: float) -> str:
@@ -73,12 +85,12 @@ def apply_event(state: DeviceState, line: str) -> bool:
         if line.startswith(prefix):
             value = line[len(prefix) :]
             if value in ("ON", "OFF", "STANDBY"):
-                setattr(target, attribute, value == "ON")
+                _observe(state, target, attribute, value == "ON")
                 return True
     for prefix, zone in (("MV", state.main), ("Z2", state.zone2)):
         if line.startswith(prefix):
             try:
-                zone.volume_db = decode_volume(line[len(prefix) :])
+                _observe(state, zone, "volume_db", decode_volume(line[len(prefix) :]))
                 return True
             except ValueError:
                 pass
@@ -92,7 +104,7 @@ def apply_event(state: DeviceState, line: str) -> bool:
             and value != "?"
             and re.fullmatch(r"[A-Z0-9 /+_.:-]{1,60}", value)
         ):
-            setattr(target, attribute, value)
+            _observe(state, target, attribute, value)
             return True
     return False
 
@@ -115,14 +127,14 @@ def apply_status_xml(state: DeviceState, data: bytes, zone: str = "main") -> boo
     for tag, attribute in (("Power", "power"), ("Mute", "mute")):
         value = root.findtext(f".//{tag}/value")
         if value and value.upper() in ("ON", "OFF", "STANDBY"):
-            setattr(target, attribute, value.upper() == "ON")
+            _observe(state, target, attribute, value.upper() == "ON")
             changed = True
     volume = root.findtext(".//MasterVolume/value")
     if volume:
         try:
             number = float(volume)
             if math.isfinite(number) and -80 <= number <= 18:
-                target.volume_db = number
+                _observe(state, target, "volume_db", number)
                 changed = True
         except ValueError:
             pass
@@ -131,9 +143,9 @@ def apply_status_xml(state: DeviceState, data: bytes, zone: str = "main") -> boo
         if value and len(value) <= 100:
             if attribute == "surround":
                 if zone == "main":
-                    state.surround = value.strip()
+                    _observe(state, state, "surround", value.strip())
             else:
-                target.source = value.strip()
+                _observe(state, target, "source", value.strip())
             changed = True
     # Main-zone XML Power is ZM state, not evidence for system PW.
     return changed

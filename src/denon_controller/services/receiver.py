@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -40,7 +41,13 @@ class Pending:
 class Receiver:
     """Single-worker service. Writes are never retried, including uncertain writes."""
 
-    def __init__(self, settings: Settings, *, simulate: bool = False) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        simulate: bool = False,
+        cancelled: threading.Event | None = None,
+    ) -> None:
         self.settings = settings
         self.state = DeviceState()
         self.diagnostics = Diagnostics(settings.host)
@@ -48,7 +55,8 @@ class Receiver:
         self.tcp: TelnetTransport | None = None
         self.simulation = SimulationTransport() if simulate else None
         self.candidates_enabled = simulate
-        self.pending: Pending | None = None
+        self.pending: dict[str, Pending] = {}
+        self.cancelled = cancelled or threading.Event()
         self.last_command = float("-inf")
         self.next_tcp_attempt = 0.0
         self.next_metadata = 0.0
@@ -57,11 +65,17 @@ class Receiver:
 
     def _initialize(self) -> None:
         if self.http is None:
-            address = private_address(self.settings.host)
-            self.http = HttpTransport(self.settings, address)
+            address = private_address(
+                self.settings.host,
+                timeout=self.settings.timeout,
+                cancelled=self.cancelled,
+            )
+            self.http = HttpTransport(self.settings, address, cancelled=self.cancelled)
             self.tcp = TelnetTransport(self.settings, address)
 
     def poll(self) -> DeviceState:
+        if self.cancelled.is_set():
+            return self.state
         started = time.monotonic()
         previous = self.state
         self.state = DeviceState(
@@ -171,16 +185,31 @@ class Receiver:
     def _confirm(self, *, can_confirm: bool = False) -> None:
         if not self.pending:
             return
-        if can_confirm and self._value(self.pending.field) == self.pending.value:
-            self.state.outcome = "Confirmed by state readback (not a hardware certification)"
-            self.diagnostics.record("Readback", self.state.outcome)
-            self.pending = None
-        elif time.monotonic() >= self.pending.deadline:
+        confirmed = False
+        expired = False
+        for field, pending in list(self.pending.items()):
+            if can_confirm and self._value(field) == pending.value:
+                del self.pending[field]
+                confirmed = True
+            elif time.monotonic() >= pending.deadline:
+                del self.pending[field]
+                expired = True
+        if self.pending:
+            self.state.outcome = "Sent, awaiting confirmation"
+        elif expired:
             self.state.outcome = "Indeterminate: not confirmed; no write retry. Refresh state."
             self.diagnostics.record("Readback", self.state.outcome)
-            self.pending = None
+        elif confirmed:
+            self.state.outcome = "Confirmed by state readback (not a hardware certification)"
+            self.diagnostics.record("Readback", self.state.outcome)
+
+    def _require_fresh(self, field: str) -> None:
+        if not self.state.is_fresh(field, min(10, self.settings.poll_interval * 2)):
+            raise ValueError(f"Fresh readback required for {field}.")
 
     def action(self, action: str, value: Any = None) -> None:
+        if self.cancelled.is_set():
+            raise ValueError("Receiver is disconnected.")
         now = time.monotonic()
         if now - self.last_command < 0.4:
             raise ValueError("Rate limited; wait before sending another command.")
@@ -200,7 +229,7 @@ class Receiver:
         fresh = (
             self.state.connection == Connection.CONNECTED
             and self.state.last_seen is not None
-            and now - self.state.last_seen <= max(10, self.settings.poll_interval * 2)
+            and now - self.state.last_seen <= min(10, self.settings.poll_interval * 2)
         )
         if action != "power_on" and (not fresh or not self.candidates_enabled):
             raise ValueError("Fresh readback and explicit unverified-control opt-in are required.")
@@ -209,10 +238,12 @@ class Receiver:
             case "power_on":
                 command, field, expected = "PWON", "main.power", True
             case "standby":
+                self._require_fresh("system_power")
                 if self.state.system_power is None:
                     raise ValueError("System power readback is unavailable.")
                 command, field, expected = "PWSTANDBY", "system_power", False
             case "mute":
+                self._require_fresh("main.mute")
                 if type(value) is not bool or self.state.main.mute is None:
                     raise ValueError("Mute readback is unavailable.")
                 if not value and (
@@ -220,24 +251,32 @@ class Receiver:
                     or self.state.main.volume_db > self.settings.volume_ceiling
                 ):
                     raise ValueError("Lower measured volume to the safe ceiling before unmuting.")
+                if not value:
+                    self._require_fresh("main.volume_db")
                 command, field, expected = "MUON" if value else "MUOFF", "main.mute", value
             case "volume" | "volume_up" | "volume_down":
+                self._require_fresh("main.volume_db")
                 current = self.state.main.volume_db
                 if current is None:
                     raise ValueError("Volume readback is unavailable.")
+                pending_volume = self.pending.get("main.volume_db")
+                baseline = min(current, pending_volume.value) if pending_volume else current
                 db = (
                     value
                     if action == "volume"
-                    else (current + (0.5 if action == "volume_up" else -0.5))
+                    else max(-80, baseline + (0.5 if action == "volume_up" else -0.5))
                 )
+                if pending_volume and db > baseline:
+                    raise ValueError("Pending volume target is quieter; await fresh readback.")
                 encoded = encode_volume(db)
-                if db > self.settings.volume_ceiling and db > current:
+                if db > self.settings.volume_ceiling and db > baseline:
                     raise ValueError("Volume exceeds the configured safe ceiling.")
-                if db == current:
+                if db == current or pending_volume and db == pending_volume.value:
                     return
                 # Absolute half-step writes avoid relative commands with ambiguous retries.
                 command, field, expected = "MV" + encoded, "main.volume_db", db
             case "source":
+                self._require_fresh("main.source")
                 if value not in self.state.sources:
                     raise ValueError("Input must come from this receiver's reported input list.")
                 command, field, expected = "SI" + value, "main.source", value
@@ -246,7 +285,7 @@ class Receiver:
         if not self.simulation:
             self._initialize()
         transport: ReceiverTransport = self.simulation or self.http  # type: ignore[assignment]
-        self.pending = Pending(field, expected, now + 10)
+        self.pending[field] = Pending(field, expected, now + 10)
         self.last_command = now
         self.state.outcome = "Sent, awaiting confirmation"
         self.diagnostics.record(action, "Sent, awaiting confirmation")
@@ -257,10 +296,11 @@ class Receiver:
             self.diagnostics.record(action, self.state.outcome)
 
     def close(self) -> None:
+        self.cancelled.set()
         for transport in (self.http, self.tcp, self.simulation):
             if transport:
                 transport.close()
         self.state.connection = Connection.DISCONNECTED
         self.state.last_seen = None
         self.candidates_enabled = bool(self.simulation)
-        self.pending = None
+        self.pending.clear()
