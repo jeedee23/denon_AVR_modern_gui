@@ -56,6 +56,7 @@ class Receiver:
         self.simulation = SimulationTransport() if simulate else None
         self.candidates_enabled = simulate
         self.pending: dict[str, Pending] = {}
+        self.indeterminate_fields: set[str] = set()
         self.cancelled = cancelled or threading.Event()
         self.last_command = float("-inf")
         self.next_tcp_attempt = 0.0
@@ -186,22 +187,25 @@ class Receiver:
         if not self.pending:
             return
         confirmed = False
-        expired = False
         for field, pending in list(self.pending.items()):
             if can_confirm and self._value(field) == pending.value:
                 del self.pending[field]
+                self.indeterminate_fields.discard(field)
+                self.diagnostics.record("Readback", f"{field}: confirmed by fresh state readback")
                 confirmed = True
             elif time.monotonic() >= pending.deadline:
                 del self.pending[field]
-                expired = True
-        if self.pending:
+                self.indeterminate_fields.add(field)
+                self.diagnostics.record("Readback", f"{field}: Indeterminate; no write retry")
+        if self.indeterminate_fields:
+            fields = ", ".join(sorted(self.indeterminate_fields))
+            self.state.outcome = (
+                "Sent, awaiting confirmation. " if self.pending else ""
+            ) + f"Indeterminate: {fields} not confirmed; no write retry. Refresh state."
+        elif self.pending:
             self.state.outcome = "Sent, awaiting confirmation"
-        elif expired:
-            self.state.outcome = "Indeterminate: not confirmed; no write retry. Refresh state."
-            self.diagnostics.record("Readback", self.state.outcome)
         elif confirmed:
             self.state.outcome = "Confirmed by state readback (not a hardware certification)"
-            self.diagnostics.record("Readback", self.state.outcome)
 
     def _require_fresh(self, field: str) -> None:
         if not self.state.is_fresh(field, min(10, self.settings.poll_interval * 2)):
@@ -288,6 +292,10 @@ class Receiver:
         self.pending[field] = Pending(field, expected, now + 10)
         self.last_command = now
         self.state.outcome = "Sent, awaiting confirmation"
+        if self.indeterminate_fields:
+            self.state.outcome += "; previous indeterminate fields: " + ", ".join(
+                sorted(self.indeterminate_fields)
+            )
         self.diagnostics.record(action, "Sent, awaiting confirmation")
         try:
             transport.send(command)
@@ -304,3 +312,4 @@ class Receiver:
         self.state.last_seen = None
         self.candidates_enabled = bool(self.simulation)
         self.pending.clear()
+        self.indeterminate_fields.clear()

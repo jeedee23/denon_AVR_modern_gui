@@ -159,6 +159,26 @@ def test_cancelled_session_cannot_send_queued_writes():
     assert not receiver.simulation.sent
 
 
+def test_mute_confirmation_cannot_hide_expired_volume_write():
+    receiver = ready()
+    receiver.action("volume", -50)
+    receiver.last_command -= 1
+    receiver.action("mute", True)
+    receiver.pending["main.volume_db"].deadline -= 20
+    receiver._confirm(can_confirm=True)
+    assert "main.volume_db" in receiver.indeterminate_fields
+    assert "Indeterminate" in receiver.state.outcome
+    assert any(
+        "main.volume_db: Indeterminate" in event.result for event in receiver.diagnostics.events
+    )
+    receiver.state.main.mute = True
+    receiver._confirm(can_confirm=True)
+    assert not receiver.pending
+    assert "main.volume_db" in receiver.state.outcome
+    assert "Indeterminate" in receiver.state.outcome
+    assert not receiver.state.outcome.startswith("Confirmed")
+
+
 @pytest.mark.parametrize("command", ["PWON\rMV98", "SIfoo?PWON", "PSMULTEQ:AUDYSSEY", "CVFL UP"])
 def test_allowlist_rejects_raw_or_calibration_commands(command):
     with pytest.raises(ValueError):

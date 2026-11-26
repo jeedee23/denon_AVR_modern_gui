@@ -1,5 +1,16 @@
 # Troubleshooting and live QA
 
+## Development checks (2026-11-26)
+
+Validated with Python 3.12 in the Linux sandbox: offline pytest suite, Ruff
+lint/format, editable installation and console entrypoint, source/wheel builds
+with included fixtures, simulated diagnostic export, and native xcb Qt under
+Xvfb. The GUI exercised all seven tabs, resizing, theme changes and a 200%
+scale factor. A screenshot of this application's simulation is in README.
+These are software-only checks, not physical Ubuntu laptop, Windows or AVR
+certification. Socket-pair tests cover trickling HTTP and total deadlines,
+TCP fragmentation, cancellation and offline errors without accessing a LAN.
+
 ## Connection or unknown status
 
 - Use the receiver's current private hostname/IP, HTTP port 8080 and TCP port

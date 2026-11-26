@@ -48,7 +48,9 @@ because a read query exists, a library supports a related family, HTTP returns
   Further reductions use the quieter of measured and unresolved target volume.
   Identical absolute-volume requests are suppressed.
   Pending expires after ten seconds as **Indeterminate**.
-  New polls/events can confirm target state but are not proof of causation.
+  Expirations are logged per field and remain visible when another field
+  confirms; partial success never hides an unconfirmed volume reduction.
+  Subsequent polled readback can confirm target state but is not proof of causation.
 - Every recognized field has its own observation timestamp. An unrelated
   event cannot authorize volume changes or unmuting. Candidate writes require
   their relevant field(s) observed within twice the poll interval, capped at

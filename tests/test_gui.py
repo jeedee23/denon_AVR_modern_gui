@@ -69,3 +69,12 @@ def test_disconnect_reconnect_sends_no_power_command(window):
     window.connect_receiver()
     wait_for(lambda: window.state.connection == Connection.CONNECTED)
     assert window.worker.receiver.simulation.sent == []
+
+
+def test_freshness_refresh_preserves_input_selection(window):
+    window.sources.inputs.setCurrentIndex(1)
+    spy = QSignalSpy(window.sources.inputs.currentIndexChanged)
+    window.update_state(window.state, [])
+    assert window.sources.inputs.currentIndex() == 1
+    assert spy.count() == 0
+    assert window.worker.receiver.simulation.sent == []
