@@ -1,0 +1,8 @@
+<!-- Synthetic parser example, NOT a receiver recording. -->
+<item>
+  <Power><value>ON</value></Power>
+  <MasterVolume><value>-45.5</value></MasterVolume>
+  <Mute><value>off</value></Mute>
+  <InputFuncSelect><value>TV</value></InputFuncSelect>
+  <selectSurround><value>STEREO</value></selectSurround>
+</item>
