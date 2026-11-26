@@ -1,0 +1,11 @@
+# Copy into the per-user configuration directory, or use the GUI Settings page.
+host = "receiver.local"
+http_port = 8080
+telnet_port = 23
+poll_interval = 5.0
+timeout = 1.5
+auto_connect = false
+volume_ceiling = -30.0
+diagnostics_verbose = false
+discovery_enabled = false
+theme = "system"

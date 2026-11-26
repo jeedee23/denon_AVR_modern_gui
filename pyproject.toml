@@ -1,0 +1,31 @@
+[project]
+name = "denon-avr-controller"
+version = "0.1.0"
+description = "Safe native Linux desktop controller for a Denon AVR"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = ["PySide6>=6.12.0,<7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.2.0,<10", "ruff>=0.17.6,<0.18", "build>=1.6.1,<2"]
+
+[project.scripts]
+denon-controller = "denon_controller.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[build-system]
+requires = ["setuptools>=84.2.1"]
+build-backend = "setuptools.build_meta"
