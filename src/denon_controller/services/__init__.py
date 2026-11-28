@@ -1,0 +1,1 @@
+"""Receiver-facing application services."""
