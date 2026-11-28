@@ -52,6 +52,10 @@ def test_discovers_and_deduplicates_ssdp_responses() -> None:
     with (
         patch("denon_controller.transport.discovery.socket.socket") as socket_factory,
         patch("denon_controller.transport.discovery._fetch_description", return_value=DENON_XML),
+        patch(
+            "denon_controller.transport.discovery._local_ipv4_addresses",
+            return_value=("192.168.1.10",),
+        ),
     ):
         sock = socket_factory.return_value.__enter__.return_value
         sock.recvfrom.side_effect = [
@@ -73,6 +77,10 @@ def test_failed_description_is_reported() -> None:
     with (
         patch("denon_controller.transport.discovery.socket.socket") as socket_factory,
         patch("denon_controller.transport.discovery._fetch_description", side_effect=OSError),
+        patch(
+            "denon_controller.transport.discovery._local_ipv4_addresses",
+            return_value=("192.168.1.10",),
+        ),
     ):
         sock = socket_factory.return_value.__enter__.return_value
         sock.recvfrom.side_effect = [(response, ("192.168.1.42", 1900)), TimeoutError()]

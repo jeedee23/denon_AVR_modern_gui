@@ -96,28 +96,64 @@ def _fetch_description(location: str) -> bytes:
         connection.close()
 
 
+def _local_ipv4_addresses() -> tuple[str, ...]:
+    """Private IPv4 addresses of this machine; multicast must be sent per interface.
+
+    On multi-homed hosts (e.g. VPN adapters) the OS default route may send the
+    SSDP search out of the wrong interface, so we search each private one.
+    """
+    addresses: set[str] = set()
+    try:
+        host = socket.gethostname()
+        for info in socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_DGRAM):
+            candidate = info[4][0]
+            try:
+                ip = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if ip.is_private and not ip.is_loopback:
+                addresses.add(candidate)
+    except OSError:
+        pass
+    return tuple(sorted(addresses)) or ("0.0.0.0",)
+
+
+def _search_on_interface(local_ip: str, timeout: float, locations: dict[str, str]) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        if local_ip != "0.0.0.0":
+            sock.bind((local_ip, 0))
+            sock.setsockopt(
+                socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local_ip)
+            )
+        sock.sendto(SEARCH_REQUEST, SSDP_ADDRESS)
+        deadline = time.monotonic() + timeout
+        while len(locations) < 32:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
+            try:
+                data, address = sock.recvfrom(65535)
+            except TimeoutError:
+                break
+            location = _location_from_response(data, address[0])
+            if location:
+                locations[location] = address[0]
+
+
 def discover_receivers(timeout: float = 3.0) -> DiscoveryResult:
     """Send a bounded multicast search; no AVR control commands are sent."""
     locations: dict[str, str] = {}
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
-            sock.sendto(SEARCH_REQUEST, SSDP_ADDRESS)
-            deadline = time.monotonic() + timeout
-            while len(locations) < 32:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                sock.settimeout(remaining)
-                try:
-                    data, address = sock.recvfrom(65535)
-                except TimeoutError:
-                    break
-                location = _location_from_response(data, address[0])
-                if location:
-                    locations[location] = address[0]
-    except OSError as exc:
-        raise ReceiverError(f"Local discovery failed: {exc}") from exc
+    interfaces = _local_ipv4_addresses()
+    failures: list[OSError] = []
+    for local_ip in interfaces:
+        try:
+            _search_on_interface(local_ip, timeout, locations)
+        except OSError as exc:
+            failures.append(exc)
+    if failures and len(failures) == len(interfaces):
+        raise ReceiverError(f"Local discovery failed: {failures[-1]}") from failures[-1]
 
     receivers: dict[str, DiscoveredReceiver] = {}
     failures = 0
